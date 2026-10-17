@@ -17,8 +17,8 @@ WC_SITE_URL = os.environ.get("WC_SITE_URL", "https://carditabs.com")
 
 # ---- FAQ RESPONSES ----
 FAQS = {
-    "shipping": "Hum pan-India shipping karte hain! Orders usually 3-5 business days mein deliver hote hain.",
-    "return": "Aap 7 din ke andar return/exchange kar sakte hain agar product mein koi issue ho. Details: carditabs.com/refund-return-policy/",
+    "shipping": "Hum pan-India shipping karte hain! Order aam taur par 24 ghante mein ship ho jaata hai. Details: carditabs.com/shipping-policy/",
+    "return": "Aap delivery ke 8 din ke andar return/exchange kar sakte hain agar product mein koi issue ho. Details: carditabs.com/refund-return-policy/",
     "payment": "Hum COD, Credit/Debit Card, aur UPI accept karte hain.",
     "contact": "Aap humein +91-9559102009 par call kar sakte hain, ya info@carditabs.com par email kar sakte hain.",
     "warranty": "Zyadatar products par 1-3 saal ki manufacturer warranty hoti hai, product ke hisaab se.",
