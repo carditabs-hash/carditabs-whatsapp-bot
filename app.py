@@ -34,7 +34,8 @@ def send_whatsapp_message(to, text):
         "type": "text",
         "text": {"body": text}
     }
-    requests.post(url, headers=headers, json=payload)
+    r = requests.post(url, headers=headers, json=payload)
+    print(f"SEND to {to}: {r.status_code} {r.text}", flush=True)
 
 
 def get_order_status(order_id):
@@ -103,7 +104,8 @@ def verify_webhook():
 
 @app.route("/webhook", methods=["POST"])
 def receive_message():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    print(f"WEBHOOK IN: {data}", flush=True)
 
     try:
         entry = data["entry"][0]
@@ -121,7 +123,7 @@ def receive_message():
                 send_whatsapp_message(from_number, reply)
 
     except (KeyError, IndexError) as e:
-        print(f"Error processing webhook: {e}")
+        print(f"Error processing webhook: {e}", flush=True)
 
     return jsonify({"status": "ok"}), 200
 
