@@ -6,8 +6,11 @@ app = Flask(__name__)
 
 # ---- CONFIG (set these as Environment Variables on Render) ----
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "carditabs_verify_123")
-WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
-PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "").strip().strip('"').strip("'")
+if WHATSAPP_TOKEN.lower().startswith("bearer "):
+    WHATSAPP_TOKEN = WHATSAPP_TOKEN[7:].strip()
+print(f"TOKEN CHECK: length={len(WHATSAPP_TOKEN)} start={WHATSAPP_TOKEN[:4]} end={WHATSAPP_TOKEN[-4:]}", flush=True)
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "").strip()
 WC_CONSUMER_KEY = os.environ.get("WC_CONSUMER_KEY", "")
 WC_CONSUMER_SECRET = os.environ.get("WC_CONSUMER_SECRET", "")
 WC_SITE_URL = os.environ.get("WC_SITE_URL", "https://carditabs.com")
