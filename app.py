@@ -41,28 +41,49 @@ def send_whatsapp_message(to, text):
     print(f"SEND to {to}: {r.status_code} {r.text}", flush=True)
 
 
-def get_order_status(order_id):
+def _last10(num):
+    digits = "".join(filter(str.isdigit, str(num or "")))
+    return digits[-10:]
+
+
+NOT_MATCHED_MSG = (
+    "Maaf kijiye, ye order aapke is WhatsApp number se registered nahi mila. "
+    "Kripya usi number se message karein jo order karte waqt diya tha, "
+    "ya +91 95591 02009 par call karein."
+)
+
+
+def get_order_status(order_id, from_number):
     try:
         url = f"{WC_SITE_URL}/wp-json/wc/v3/orders/{order_id}"
-        r = requests.get(url, auth=(WC_CONSUMER_KEY, WC_CONSUMER_SECRET))
-        if r.status_code == 200:
-            order = r.json()
-            status = order.get("status", "unknown")
-            total = order.get("total", "N/A")
-            status_map = {
-                "pending": "Payment ka wait ho raha hai",
-                "processing": "Order process ho raha hai, jaldi ship hoga",
-                "on-hold": "Order hold par hai",
-                "completed": "Order deliver ho chuka hai",
-                "cancelled": "Order cancel ho gaya hai",
-                "refunded": "Order refund ho gaya hai",
-                "shipped": "Order ship ho chuka hai"
-            }
-            friendly_status = status_map.get(status, status)
-            return f"Order #{order_id} ka status: {friendly_status}\nTotal: Rs {total}"
-        else:
-            return f"Order #{order_id} nahi mila. Please order ID check karein."
+        r = requests.get(url, auth=(WC_CONSUMER_KEY, WC_CONSUMER_SECRET), timeout=20)
+        if r.status_code != 200:
+            return NOT_MATCHED_MSG
+        order = r.json()
+        sender = _last10(from_number)
+        phones = {
+            _last10(order.get("billing", {}).get("phone")),
+            _last10(order.get("shipping", {}).get("phone")),
+        }
+        phones.discard("")
+        if not sender or sender not in phones:
+            print(f"ORDER {order_id}: phone mismatch for sender ending {sender[-4:]}", flush=True)
+            return NOT_MATCHED_MSG
+        status = order.get("status", "unknown")
+        total = order.get("total", "N/A")
+        status_map = {
+            "pending": "Payment ka wait ho raha hai",
+            "processing": "Order process ho raha hai, jaldi ship hoga",
+            "on-hold": "Order hold par hai",
+            "completed": "Order deliver ho chuka hai",
+            "cancelled": "Order cancel ho gaya hai",
+            "refunded": "Order refund ho gaya hai",
+            "shipped": "Order ship ho chuka hai"
+        }
+        friendly_status = status_map.get(status, status)
+        return f"Order #{order_id} ka status: {friendly_status}\nTotal: Rs {total}"
     except Exception as e:
+        print(f"Order lookup error: {e}", flush=True)
         return "Order status check karne mein problem aa rahi hai. Please thodi der baad try karein."
 
 
@@ -73,7 +94,7 @@ def process_message(text, from_number):
     if "order" in text_lower:
         digits = "".join(filter(str.isdigit, text_lower))
         if digits:
-            return get_order_status(digits)
+            return get_order_status(digits, from_number)
         else:
             return "Order status check karne ke liye, apna order number bhejein. Jaise: 'order 12345'"
 
