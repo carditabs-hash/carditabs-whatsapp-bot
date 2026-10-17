@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from flask import Flask, request, jsonify
 
@@ -11,6 +12,9 @@ if WHATSAPP_TOKEN.lower().startswith("bearer "):
     WHATSAPP_TOKEN = WHATSAPP_TOKEN[7:].strip()
 print(f"TOKEN CHECK: length={len(WHATSAPP_TOKEN)} start={WHATSAPP_TOKEN[:4]} end={WHATSAPP_TOKEN[-4:]}", flush=True)
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_SECRET = os.environ.get("TELEGRAM_SECRET", "").strip()
 WC_CONSUMER_KEY = os.environ.get("WC_CONSUMER_KEY", "")
 WC_CONSUMER_SECRET = os.environ.get("WC_CONSUMER_SECRET", "")
 WC_SITE_URL = os.environ.get("WC_SITE_URL", "https://carditabs.com")
@@ -37,8 +41,40 @@ def send_whatsapp_message(to, text):
         "type": "text",
         "text": {"body": text}
     }
-    r = requests.post(url, headers=headers, json=payload)
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
     print(f"SEND to {to}: {r.status_code} {r.text}", flush=True)
+    return r
+
+
+# ---- TELEGRAM (owner inbox) ----
+def tg_send(chat_id, text, reply_to=None):
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        return None
+    payload = {"chat_id": chat_id, "text": text[:4000]}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                          json=payload, timeout=20)
+        if r.status_code != 200:
+            print(f"TELEGRAM SEND ERROR: {r.status_code} {r.text}", flush=True)
+        return r
+    except Exception as e:
+        print(f"TELEGRAM SEND ERROR: {e}", flush=True)
+        return None
+
+
+def forward_to_owner(name, number, customer_text, bot_reply):
+    text = (
+        f"📩 WhatsApp message\n"
+        f"Naam: {name}\n"
+        f"Number: +{number}\n\n"
+        f"Customer: {customer_text}\n\n"
+        f"🤖 Bot ne jawab diya: {bot_reply if bot_reply else '(koi auto-reply nahi)'}\n\n"
+        f"↩️ Customer ko jawab dene ke liye is message ko Reply karein.\n"
+        f"#wa{number}"
+    )
+    tg_send(TELEGRAM_CHAT_ID, text)
 
 
 def _last10(num):
@@ -140,16 +176,70 @@ def receive_message():
             message = value["messages"][0]
             from_number = message["from"]
             msg_type = message["type"]
+            name = (value.get("contacts") or [{}])[0].get("profile", {}).get("name", "")
 
             if msg_type == "text":
                 text = message["text"]["body"]
                 reply = process_message(text, from_number)
                 send_whatsapp_message(from_number, reply)
+                forward_to_owner(name, from_number, text, reply)
+            else:
+                reply = ("Shukriya! Aapka message mil gaya hai. Humari team jaldi aapko jawab degi. "
+                         "Order status ke liye 'order [number]' likhein.")
+                send_whatsapp_message(from_number, reply)
+                forward_to_owner(name, from_number, f"[{msg_type} bheja - WhatsApp par hi dekhna sambhav nahi, customer se text mein poochein]", reply)
 
     except (KeyError, IndexError) as e:
         print(f"Error processing webhook: {e}", flush=True)
 
     return jsonify({"status": "ok"}), 200
+
+
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    if TELEGRAM_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_SECRET:
+        return "forbidden", 403
+    upd = request.get_json(silent=True) or {}
+    msg = upd.get("message") or {}
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    text = (msg.get("text") or "").strip()
+    if not chat_id:
+        return jsonify({"ok": True}), 200
+
+    # Setup help: /start batata hai chat id
+    if text.startswith("/start") or text.startswith("/id"):
+        tg_send(chat_id, f"Aapka Telegram chat ID: {chat_id}\nIse Render mein TELEGRAM_CHAT_ID mein daalein.")
+        return jsonify({"ok": True}), 200
+
+    # Sirf owner hi reply kar sakta hai
+    if not TELEGRAM_CHAT_ID or chat_id != TELEGRAM_CHAT_ID:
+        return jsonify({"ok": True}), 200
+
+    replied = (msg.get("reply_to_message") or {}).get("text", "")
+    m = re.search(r"#wa(\d{8,15})", replied)
+    if not m:
+        tg_send(chat_id, "Customer ko jawab dene ke liye uske WhatsApp wale message par 'Reply' karke likhein.",
+                reply_to=msg.get("message_id"))
+        return jsonify({"ok": True}), 200
+    if not text:
+        tg_send(chat_id, "Abhi sirf text jawab bheja ja sakta hai.", reply_to=msg.get("message_id"))
+        return jsonify({"ok": True}), 200
+
+    number = m.group(1)
+    r = send_whatsapp_message(number, text)
+    if r is not None and r.status_code == 200:
+        tg_send(chat_id, f"✅ +{number} ko bhej diya.", reply_to=msg.get("message_id"))
+    else:
+        err = ""
+        try:
+            err = r.json().get("error", {}).get("message", "")
+        except Exception:
+            pass
+        hint = ""
+        if r is not None and "131047" in (r.text or ""):
+            hint = "\n(Customer ka aakhri message 24 ghante se purana hai. WhatsApp ke niyam se ab sirf approved template hi bheja ja sakta hai.)"
+        tg_send(chat_id, f"❌ Nahi gaya: {err}{hint}", reply_to=msg.get("message_id"))
+    return jsonify({"ok": True}), 200
 
 
 @app.route("/", methods=["GET"])
