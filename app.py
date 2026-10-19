@@ -250,7 +250,7 @@ def telegram_webhook():
 import json, time, html as _html
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()   # khali = apne aap sahi model chunega
-_model = {"name": GEMINI_MODEL, "t": 0}
+_model = {"name": GEMINI_MODEL, "t": 0, "pool": []}
 
 def pick_model(force=False):
     """Google ki list se naya 'flash' model chunna (purane model band ho jate hain)."""
@@ -269,7 +269,8 @@ def pick_model(force=False):
     pool.sort(key=lambda n: (ver(n), "latest" not in n), reverse=True)
     if not pool:
         raise RuntimeError("koi Gemini model nahi mila")
-    _model.update(name=pool[0], t=time.time())
+    lite = sorted([n for n in names if "flash-lite" in n and "preview" not in n], key=ver, reverse=True)
+    _model.update(name=pool[0], t=time.time(), pool=(pool[:3] + lite[:2]))
     print("GEMINI MODEL:", pool[0], flush=True)
     return pool[0]
 ALLOWED_ORIGINS = {"https://carditabs.com", "https://www.carditabs.com"}
@@ -331,9 +332,22 @@ def ai_answer(message, history):
     def call(model):
         return requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                              headers={"x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=40)
-    r = call(pick_model())
+    first = pick_model()
+    r = call(first)
     if r.status_code == 404:               # model band ho gaya -> naya chuno
-        r = call(pick_model(force=True))
+        first = pick_model(force=True)
+        r = call(first)
+    if r.status_code in (429, 500, 503):   # busy / quota -> dobara, phir dusra model
+        tried = [first]
+        for m in [first] + [x for x in _model.get("pool", []) if x != first]:
+            time.sleep(1.5)
+            r = call(m)
+            tried.append(m)
+            if r.ok:
+                print("GEMINI fallback ok:", m, flush=True)
+                break
+            if len(tried) >= 4:
+                break
     if not r.ok:
         raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
