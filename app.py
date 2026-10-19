@@ -242,6 +242,120 @@ def telegram_webhook():
     return jsonify({"ok": True}), 200
 
 
+
+# =====================================================================
+#  SHOP WITH AI  (website par "Shop with AI" chat ke liye)
+#  Render env: GEMINI_API_KEY (zaroori), GEMINI_MODEL (optional)
+# =====================================================================
+import json, time, html as _html
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+ALLOWED_ORIGINS = {"https://carditabs.com", "https://www.carditabs.com"}
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"}
+_catalog = {"t": 0, "items": []}
+_rate = {}
+
+def _strip(t):
+    return re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>|\[[^\]]*\]", " ", t or ""))).strip()
+
+def get_catalog():
+    if _catalog["items"] and time.time() - _catalog["t"] < 6 * 3600:
+        return _catalog["items"]
+    items, page = [], 1
+    while page <= 5:
+        try:
+            r = requests.get(f"{WC_SITE_URL}/wp-json/wc/store/v1/products",
+                             params={"per_page": 100, "page": page}, headers=_UA, timeout=20)
+            data = r.json() if r.ok else []
+        except Exception as e:
+            print("catalog error", e, flush=True); break
+        if not data:
+            break
+        for p in data:
+            pr = p.get("prices", {}); mu = 10 ** int(pr.get("currency_minor_unit", 2) or 2)
+            items.append({
+                "id": p["id"], "name": _html.unescape(p["name"]),
+                "price": int(int(pr.get("price") or 0) / mu), "mrp": int(int(pr.get("regular_price") or 0) / mu),
+                "cat": ", ".join(c["name"] for c in p.get("categories", [])),
+                "stock": p.get("is_in_stock", True), "url": p.get("permalink", ""),
+                "img": (p.get("images") or [{}])[0].get("thumbnail", ""),
+                "desc": _strip(p.get("short_description") or p.get("description"))[:180]})
+        page += 1
+    if items:
+        _catalog.update(t=time.time(), items=items)
+    return _catalog["items"]
+
+AI_RULES = """You are "CardiTabs AI", the shopping assistant of CardiTabs (carditabs.com), a genuine medical equipment store from Lucknow, India.
+Rules:
+- Recommend ONLY products from the CATALOG below. Never invent products, prices or specs. Max 4 products.
+- Reply in the customer's language/style (Hinglish, Hindi or English). Keep replies short (2-5 sentences), warm and practical.
+- You are not a doctor. Never diagnose or suggest doses/settings. For CPAP/BiPAP pressure, oxygen or anything clinical, say to follow the doctor's prescription.
+- Store facts: pan-India delivery, dispatch usually within 24 hours, Cash on Delivery available, 8-day easy returns, first order code WELCOME500 (20% off up to Rs 500). WhatsApp/Call +91 95591 02009.
+- If nothing in the catalog fits, say so and suggest WhatsApp for help.
+Return ONLY JSON: {"reply": "<text>", "product_ids": [<ids from catalog>]}"""
+
+def ai_answer(message, history):
+    cat = get_catalog()
+    lines = "\n".join(f'{c["id"]} | {c["name"]} | Rs {c["price"]} (MRP {c["mrp"]}) | {c["cat"]} | '
+                      f'{"in stock" if c["stock"] else "out of stock"} | {c["desc"]}' for c in cat)
+    contents = []
+    for h in history[-6:]:
+        role = "model" if h.get("role") == "ai" else "user"
+        contents.append({"role": role, "parts": [{"text": str(h.get("text", ""))[:600]}]})
+    contents.append({"role": "user", "parts": [{"text": message[:600]}]})
+    body = {"systemInstruction": {"parts": [{"text": AI_RULES + "\n\nCATALOG (id | name | price | category | stock | info):\n" + lines}]},
+            "contents": contents,
+            "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json", "maxOutputTokens": 800}}
+    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+                      params={"key": GEMINI_API_KEY}, json=body, timeout=40)
+    r.raise_for_status()
+    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    try:
+        out = json.loads(txt)
+    except Exception:
+        m = re.search(r"\{.*\}", txt, re.S)
+        out = json.loads(m.group(0)) if m else {"reply": txt, "product_ids": []}
+    by_id = {c["id"]: c for c in cat}
+    prods = [by_id[int(i)] for i in out.get("product_ids", []) if str(i).isdigit() and int(i) in by_id][:4]
+    return out.get("reply", ""), [{k: p[k] for k in ("name", "price", "mrp", "url", "img", "stock")} for p in prods]
+
+@app.after_request
+def _cors(resp):
+    o = request.headers.get("Origin", "")
+    if o in ALLOWED_ORIGINS and request.path.startswith("/ai-shop"):
+        resp.headers["Access-Control-Allow-Origin"] = o
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
+
+@app.route("/ai-shop", methods=["POST", "OPTIONS"])
+def ai_shop():
+    if request.method == "OPTIONS":
+        return "", 204
+    if not GEMINI_API_KEY:
+        return jsonify({"reply": "AI abhi set nahi hai. Kripya WhatsApp karein: +91 95591 02009", "products": []}), 200
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "").split(",")[0].strip()
+    now = time.time()
+    hits = [t for t in _rate.get(ip, []) if now - t < 3600]
+    if len(hits) >= 30:
+        return jsonify({"reply": "Bahut zyada sawaal ho gaye. Thodi der baad try karein ya WhatsApp karein: +91 95591 02009", "products": []}), 200
+    _rate[ip] = hits + [now]
+    data = request.get_json(silent=True) or {}
+    msg = str(data.get("message", "")).strip()
+    if not msg:
+        return jsonify({"reply": "Aap kya dhoondh rahe hain? Jaise: 'ghar ke liye BP machine'", "products": []}), 200
+    try:
+        reply, prods = ai_answer(msg, data.get("history") or [])
+    except Exception as e:
+        print("AI error:", e, flush=True)
+        return jsonify({"reply": "Maaf kijiye, abhi jawab nahi de pa raha. WhatsApp karein: +91 95591 02009", "products": []}), 200
+    try:
+        if TELEGRAM_CHAT_ID:
+            tg_send(TELEGRAM_CHAT_ID, f"🤖 Shop with AI\nQ: {msg[:300]}\nA: {reply[:300]}\nProducts: {', '.join(p['name'][:40] for p in prods) or '-'}")
+    except Exception:
+        pass
+    return jsonify({"reply": reply, "products": prods}), 200
+
 @app.route("/", methods=["GET"])
 def home():
     return "CardiTabs WhatsApp Bot is running!", 200
