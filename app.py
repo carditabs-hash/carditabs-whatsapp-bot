@@ -249,7 +249,29 @@ def telegram_webhook():
 # =====================================================================
 import json, time, html as _html
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()   # khali = apne aap sahi model chunega
+_model = {"name": GEMINI_MODEL, "t": 0}
+
+def pick_model(force=False):
+    """Google ki list se naya 'flash' model chunna (purane model band ho jate hain)."""
+    if _model["name"] and not force and (GEMINI_MODEL or time.time() - _model["t"] < 24 * 3600):
+        return _model["name"]
+    r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                     headers={"x-goog-api-key": GEMINI_API_KEY}, params={"pageSize": 200}, timeout=20)
+    r.raise_for_status()
+    names = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+             if "generateContent" in m.get("supportedGenerationMethods", [])]
+    flash = [n for n in names if "flash" in n and not any(x in n for x in ("lite", "image", "tts", "audio", "live", "preview", "exp", "thinking"))]
+    def ver(n):
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return float(m.group(1)) if m else 0
+    pool = flash or [n for n in names if "flash" in n] or names
+    pool.sort(key=lambda n: (ver(n), "latest" not in n), reverse=True)
+    if not pool:
+        raise RuntimeError("koi Gemini model nahi mila")
+    _model.update(name=pool[0], t=time.time())
+    print("GEMINI MODEL:", pool[0], flush=True)
+    return pool[0]
 ALLOWED_ORIGINS = {"https://carditabs.com", "https://www.carditabs.com"}
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"}
 _catalog = {"t": 0, "items": []}
@@ -306,9 +328,14 @@ def ai_answer(message, history):
     body = {"systemInstruction": {"parts": [{"text": AI_RULES + "\n\nCATALOG (id | name | price | category | stock | info):\n" + lines}]},
             "contents": contents,
             "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json", "maxOutputTokens": 800}}
-    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-                      params={"key": GEMINI_API_KEY}, json=body, timeout=40)
-    r.raise_for_status()
+    def call(model):
+        return requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                             headers={"x-goog-api-key": GEMINI_API_KEY}, json=body, timeout=40)
+    r = call(pick_model())
+    if r.status_code == 404:               # model band ho gaya -> naya chuno
+        r = call(pick_model(force=True))
+    if not r.ok:
+        raise RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
     try:
         out = json.loads(txt)
