@@ -363,7 +363,7 @@ def ai_answer(message, history):
 @app.after_request
 def _cors(resp):
     o = request.headers.get("Origin", "")
-    if o in ALLOWED_ORIGINS and request.path.startswith("/ai-shop"):
+    if o in ALLOWED_ORIGINS and request.path in ("/ai-shop", "/ai-lead"):
         resp.headers["Access-Control-Allow-Origin"] = o
         resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -396,6 +396,47 @@ def ai_shop():
     except Exception:
         pass
     return jsonify({"reply": reply, "products": prods}), 200
+
+_lead_rate = {}
+
+@app.route("/ai-lead", methods=["POST", "OPTIONS"])
+def ai_lead():
+    """AI chat se 'Callback chahiye' form: naam + mobile Telegram par bhejna."""
+    if request.method == "OPTIONS":
+        return "", 204
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "").split(",")[0].strip()
+    now = time.time()
+    hits = [t for t in _lead_rate.get(ip, []) if now - t < 3600]
+    if len(hits) >= 5:
+        return jsonify({"ok": False, "msg": "Thodi der baad try karein ya WhatsApp karein: +91 95591 02009"}), 200
+    data = request.get_json(silent=True) or {}
+    if str(data.get("website", "")).strip():          # bot trap
+        return jsonify({"ok": True}), 200
+    name = re.sub(r"\s+", " ", str(data.get("name", ""))).strip()[:60]
+    phone = re.sub(r"\D", "", str(data.get("phone", "")))
+    if phone.startswith("91") and len(phone) == 12:
+        phone = phone[2:]
+    phone = phone.lstrip("0") if len(phone) == 11 else phone
+    if not re.fullmatch(r"[6-9]\d{9}", phone):
+        return jsonify({"ok": False, "msg": "Sahi 10 digit mobile number likhein"}), 200
+    _lead_rate[ip] = hits + [now]
+    question = str(data.get("question", "")).strip()[:300]
+    page = str(data.get("page", "")).strip()[:200]
+    text = (f"📞 AI CALLBACK LEAD\n"
+            f"Naam: {name or '-'}\n"
+            f"Mobile: +91 {phone}\n"
+            f"Sawal: {question or '-'}\n"
+            f"Page: {page or '-'}\n"
+            f"WhatsApp: https://wa.me/91{phone}")
+    sent = None
+    try:
+        if TELEGRAM_CHAT_ID:
+            sent = tg_send(TELEGRAM_CHAT_ID, text)
+    except Exception as e:
+        print("LEAD TG error:", e, flush=True)
+    print(f"AI LEAD: {name} {phone[:2]}******{phone[-2:]} tg={getattr(sent, 'status_code', None)}", flush=True)
+    return jsonify({"ok": True}), 200
+
 
 @app.route("/", methods=["GET"])
 def home():
